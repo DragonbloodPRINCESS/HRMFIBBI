@@ -1,7 +1,7 @@
 package com.ataroti.ui.screens
 
 import android.Manifest
-import android.annotation.SuppressLint
+import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
@@ -40,8 +40,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -53,10 +56,10 @@ import com.ataroti.ui.components.DeckPickerBottomSheet
 import com.ataroti.ui.viewmodel.LiveOracleViewModel
 import kotlin.math.roundToInt
 
-@SuppressLint("MissingPermission")
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun LiveCameraScreen(viewModel: LiveOracleViewModel, onOpenSessions: () -> Unit, onOpenSandbox: () -> Unit) {
+    val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val placed by viewModel.placed.collectAsState()
     val cards by viewModel.cards.collectAsState()
@@ -66,66 +69,93 @@ fun LiveCameraScreen(viewModel: LiveOracleViewModel, onOpenSessions: () -> Unit,
     var pendingCard by remember { mutableStateOf<CardEntity?>(null) }
     var orientation by remember { mutableStateOf(Orientation.UPRIGHT) }
     var clarifierFor by remember { mutableLongStateOf(-1L) }
-    var canvasWidth by remember { mutableFloatStateOf(1f) }
-    var canvasHeight by remember { mutableFloatStateOf(1f) }
+    var viewportSize by remember { mutableStateOf(IntSize.Zero) }
 
-    var hasCameraPermission by remember { mutableStateOf(false) }
+    var hasCameraPermission by remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+        )
+    }
     val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
         hasCameraPermission = it
     }
 
     LaunchedEffect(Unit) {
-        permissionLauncher.launch(Manifest.permission.CAMERA)
+        if (!hasCameraPermission) {
+            permissionLauncher.launch(Manifest.permission.CAMERA)
+        }
     }
 
     Box(
         Modifier
             .fillMaxSize()
             .background(Color.Black)
-            .onSizeChanged {
-                canvasWidth = it.width.toFloat().coerceAtLeast(1f)
-                canvasHeight = it.height.toFloat().coerceAtLeast(1f)
-            }
     ) {
-        if (hasCameraPermission) {
-            AndroidView(factory = {
-                PreviewView(it).apply {
-                    val providerFuture = ProcessCameraProvider.getInstance(it)
-                    providerFuture.addListener(
-                        {
-                            val provider = providerFuture.get()
-                            val preview = Preview.Builder().build().also { p -> p.setSurfaceProvider(surfaceProvider) }
-                            provider.unbindAll()
-                            provider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview)
-                        },
-                        ContextCompat.getMainExecutor(it)
+        Box(
+            Modifier
+                .fillMaxSize()
+                .onSizeChanged { viewportSize = it }
+        ) {
+            if (hasCameraPermission) {
+                AndroidView(factory = {
+                    PreviewView(it).apply {
+                        val providerFuture = ProcessCameraProvider.getInstance(it)
+                        providerFuture.addListener(
+                            {
+                                val provider = providerFuture.get()
+                                val preview = Preview.Builder().build().also { p -> p.setSurfaceProvider(surfaceProvider) }
+                                provider.unbindAll()
+                                provider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview)
+                            },
+                            ContextCompat.getMainExecutor(it)
+                        )
+                    }
+                }, modifier = Modifier.fillMaxSize())
+            } else {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(horizontal = 24.dp),
+                    verticalArrangement = Arrangement.Center,
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text(
+                        "Camera permission is required to start Live mode.",
+                        color = Color(0xFFE8E0CF),
+                        textAlign = TextAlign.Center
                     )
+                    Button(onClick = { permissionLauncher.launch(Manifest.permission.CAMERA) }) {
+                        Text("Grant camera access")
+                    }
                 }
-            }, modifier = Modifier.fillMaxSize())
-        }
+            }
 
-        Box(Modifier.fillMaxSize().pointerInput(pendingCard, orientation, canvasWidth, canvasHeight) {
-            detectTapGestures(onTap = { off ->
-                pendingCard?.let {
-                    val parent = clarifierFor.takeIf { id -> id > 0 }
-                    viewModel.addCard(it, orientation, off.x / canvasWidth, off.y / canvasHeight, parent)
-                    pendingCard = null
-                    clarifierFor = -1L
-                }
+            val viewportWidth = viewportSize.width.toFloat().coerceAtLeast(1f)
+            val viewportHeight = viewportSize.height.toFloat().coerceAtLeast(1f)
+
+            Box(Modifier.fillMaxSize().pointerInput(pendingCard, orientation, viewportWidth, viewportHeight) {
+                detectTapGestures(onTap = { off ->
+                    pendingCard?.let {
+                        val parent = clarifierFor.takeIf { id -> id > 0 }
+                        viewModel.addCard(it, orientation, off.x / viewportWidth, off.y / viewportHeight, parent)
+                        pendingCard = null
+                        clarifierFor = -1L
+                    }
+                })
             })
-        })
 
-        placed.forEach { item ->
-            OverlayCard(
-                item = item,
-                canvasWidth = canvasWidth,
-                canvasHeight = canvasHeight,
-                onUpdate = viewModel::updateCard,
-                onClarifier = {
-                    clarifierFor = item.id
-                    showPicker = true
-                }
-            )
+            placed.forEach { item ->
+                OverlayCard(
+                    item = item,
+                    canvasWidth = viewportWidth,
+                    canvasHeight = viewportHeight,
+                    onUpdate = viewModel::updateCard,
+                    onClarifier = {
+                        clarifierFor = item.id
+                        showPicker = true
+                    }
+                )
+            }
         }
 
         Column(
