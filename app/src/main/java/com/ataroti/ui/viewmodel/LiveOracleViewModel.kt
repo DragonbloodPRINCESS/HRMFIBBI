@@ -15,41 +15,68 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
 class LiveOracleViewModel(private val repo: AtarotiRepository) : ViewModel() {
-    private var sessionId: Long? = null
+    private val sessionId = MutableStateFlow<Long?>(null)
+    private var query: String = ""
+    private var allCards: List<CardEntity> = emptyList()
+
     private val _cards = MutableStateFlow<List<CardEntity>>(emptyList())
     val cards: StateFlow<List<CardEntity>> = _cards.asStateFlow()
+
     private val _placed = MutableStateFlow<List<PlacedCardEntity>>(emptyList())
     val placed: StateFlow<List<PlacedCardEntity>> = _placed.asStateFlow()
+
     private val _summary = MutableStateFlow<List<String>>(emptyList())
     val summary: StateFlow<List<String>> = _summary.asStateFlow()
 
-    private var allCards: List<CardEntity> = emptyList()
-
     init {
         viewModelScope.launch {
-            sessionId = repo.createSession(Mode.LIVE_ORACLE, "Live Oracle")
+            sessionId.value = repo.createSession(Mode.LIVE_ORACLE, "Live Oracle")
+        }
+        viewModelScope.launch {
             repo.cards().collect {
                 allCards = it
-                _cards.value = it
+                _cards.value = applyFilter(it, query)
             }
         }
         viewModelScope.launch {
-            while (sessionId == null) kotlinx.coroutines.delay(30)
-            repo.placedCards(sessionId!!).collect {
-                _placed.value = it
-                _summary.value = SummaryEngine.summarize(it)
+            sessionId.collect { id ->
+                id ?: return@collect
+                repo.placedCards(id).collect {
+                    _placed.value = it
+                    _summary.value = SummaryEngine.summarize(it)
+                }
             }
         }
     }
 
     fun setQuery(value: String) {
-        _cards.value = if (value.isBlank()) allCards else allCards.filter { it.title.contains(value, true) || it.kind.contains(value, true) }
+        query = value
+        _cards.value = applyFilter(allCards, query)
+    }
+
+    private fun applyFilter(source: List<CardEntity>, query: String): List<CardEntity> {
+        if (query.isBlank()) return source
+        return source.filter {
+            it.title.contains(query, true) ||
+                it.kind.contains(query, true) ||
+                (it.suit?.contains(query, true) == true)
+        }
     }
 
     fun addCard(card: CardEntity, orientation: Orientation, xNorm: Float, yNorm: Float, parentPlacedId: Long? = null) {
-        val sid = sessionId ?: return
+        val sid = sessionId.value ?: return
         viewModelScope.launch {
-            repo.placeCard(PlacedCardEntity(sessionId = sid, cardId = card.cardId, title = card.title, orientation = orientation, xNorm = xNorm, yNorm = yNorm, parentPlacedId = parentPlacedId))
+            repo.placeCard(
+                PlacedCardEntity(
+                    sessionId = sid,
+                    cardId = card.cardId,
+                    title = card.title,
+                    orientation = orientation,
+                    xNorm = xNorm.coerceIn(0f, 1f),
+                    yNorm = yNorm.coerceIn(0f, 1f),
+                    parentPlacedId = parentPlacedId
+                )
+            )
         }
     }
 

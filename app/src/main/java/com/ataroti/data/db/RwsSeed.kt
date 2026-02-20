@@ -14,7 +14,8 @@ object RwsSeed {
         val minors = buildList {
             suits.forEach { suit ->
                 ranks.forEach { rank ->
-                    add(CardEntity(deckId = "rws", cardId = cardId++, title = "$rank of ${suit.lowercase().replaceFirstChar { it.uppercase() }}", kind = suit, suit = suit, rank = rank, imageAsset = "rws_${cardId}.webp"))
+                    val currentId = cardId++
+                    add(CardEntity(deckId = "rws", cardId = currentId, title = "$rank of ${suit.lowercase().replaceFirstChar { it.uppercase() }}", kind = suit, suit = suit, rank = rank, imageAsset = "rws_${currentId}.webp"))
                 }
             }
         }

@@ -1,6 +1,9 @@
 package com.ataroti.ui.screens
 
+import android.Manifest
 import android.annotation.SuppressLint
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
@@ -16,8 +19,8 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
@@ -25,6 +28,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -36,10 +40,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.content.ContextCompat
 import com.ataroti.data.db.CardEntity
 import com.ataroti.data.db.PlacedCardEntity
 import com.ataroti.data.model.Orientation
@@ -60,22 +66,49 @@ fun LiveCameraScreen(viewModel: LiveOracleViewModel, onOpenSessions: () -> Unit,
     var pendingCard by remember { mutableStateOf<CardEntity?>(null) }
     var orientation by remember { mutableStateOf(Orientation.UPRIGHT) }
     var clarifierFor by remember { mutableLongStateOf(-1L) }
+    var canvasWidth by remember { mutableFloatStateOf(1f) }
+    var canvasHeight by remember { mutableFloatStateOf(1f) }
 
-    Box(Modifier.fillMaxSize().background(Color.Black)) {
-        AndroidView(factory = {
-            PreviewView(it).apply {
-                val provider = ProcessCameraProvider.getInstance(it).get()
-                val preview = Preview.Builder().build().also { p -> p.setSurfaceProvider(surfaceProvider) }
-                provider.unbindAll()
-                provider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview)
+    var hasCameraPermission by remember { mutableStateOf(false) }
+    val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
+        hasCameraPermission = it
+    }
+
+    LaunchedEffect(Unit) {
+        permissionLauncher.launch(Manifest.permission.CAMERA)
+    }
+
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(Color.Black)
+            .onSizeChanged {
+                canvasWidth = it.width.toFloat().coerceAtLeast(1f)
+                canvasHeight = it.height.toFloat().coerceAtLeast(1f)
             }
-        }, modifier = Modifier.fillMaxSize())
+    ) {
+        if (hasCameraPermission) {
+            AndroidView(factory = {
+                PreviewView(it).apply {
+                    val providerFuture = ProcessCameraProvider.getInstance(it)
+                    providerFuture.addListener(
+                        {
+                            val provider = providerFuture.get()
+                            val preview = Preview.Builder().build().also { p -> p.setSurfaceProvider(surfaceProvider) }
+                            provider.unbindAll()
+                            provider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview)
+                        },
+                        ContextCompat.getMainExecutor(it)
+                    )
+                }
+            }, modifier = Modifier.fillMaxSize())
+        }
 
-        Box(Modifier.fillMaxSize().pointerInput(pendingCard, orientation) {
+        Box(Modifier.fillMaxSize().pointerInput(pendingCard, orientation, canvasWidth, canvasHeight) {
             detectTapGestures(onTap = { off ->
                 pendingCard?.let {
                     val parent = clarifierFor.takeIf { id -> id > 0 }
-                    viewModel.addCard(it, orientation, off.x / size.width, off.y / size.height, parent)
+                    viewModel.addCard(it, orientation, off.x / canvasWidth, off.y / canvasHeight, parent)
                     pendingCard = null
                     clarifierFor = -1L
                 }
@@ -83,15 +116,22 @@ fun LiveCameraScreen(viewModel: LiveOracleViewModel, onOpenSessions: () -> Unit,
         })
 
         placed.forEach { item ->
-            OverlayCard(item = item,
+            OverlayCard(
+                item = item,
+                canvasWidth = canvasWidth,
+                canvasHeight = canvasHeight,
                 onUpdate = viewModel::updateCard,
                 onClarifier = {
                     clarifierFor = item.id
                     showPicker = true
-                })
+                }
+            )
         }
 
-        Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth().background(Color(0xAA111111)).padding(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Column(
+            Modifier.align(Alignment.BottomCenter).fillMaxWidth().background(Color(0xAA111111)).padding(8.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = { showPicker = true }) { Text("Add Card") }
                 Button(onClick = onOpenSandbox) { Text("Sandbox") }
@@ -105,35 +145,47 @@ fun LiveCameraScreen(viewModel: LiveOracleViewModel, onOpenSessions: () -> Unit,
         }
 
         if (showPicker) {
-            DeckPickerBottomSheet(cards = cards, onQuery = viewModel::setQuery, onSelect = {
-                pendingCard = it
-                showPicker = false
-            }, onDismiss = { showPicker = false })
+            DeckPickerBottomSheet(
+                cards = cards,
+                onQuery = viewModel::setQuery,
+                onSelect = {
+                    pendingCard = it
+                    showPicker = false
+                },
+                onDismiss = { showPicker = false }
+            )
         }
     }
 }
 
 @Composable
-private fun OverlayCard(item: PlacedCardEntity, onUpdate: (PlacedCardEntity) -> Unit, onClarifier: () -> Unit) {
-    var x by remember(item.id) { mutableFloatStateOf(item.xNorm) }
-    var y by remember(item.id) { mutableFloatStateOf(item.yNorm) }
+private fun OverlayCard(
+    item: PlacedCardEntity,
+    canvasWidth: Float,
+    canvasHeight: Float,
+    onUpdate: (PlacedCardEntity) -> Unit,
+    onClarifier: () -> Unit
+) {
+    var xNorm by remember(item.id) { mutableFloatStateOf(item.xNorm) }
+    var yNorm by remember(item.id) { mutableFloatStateOf(item.yNorm) }
     var scale by remember(item.id) { mutableFloatStateOf(item.scale) }
     var rotation by remember(item.id) { mutableFloatStateOf(item.rotationDeg) }
+
     val transform = rememberTransformableState { zoomChange, panChange, rotationChange ->
-        x += panChange.x / 1080f
-        y += panChange.y / 1920f
+        xNorm = (xNorm + (panChange.x / canvasWidth)).coerceIn(0f, 1f)
+        yNorm = (yNorm + (panChange.y / canvasHeight)).coerceIn(0f, 1f)
         scale = (scale * zoomChange).coerceIn(0.6f, 2.5f)
         rotation += rotationChange
     }
 
     Surface(
         modifier = Modifier
-            .offset { IntOffset((x * 1080).roundToInt(), (y * 1920).roundToInt()) }
+            .offset { IntOffset((xNorm * canvasWidth).roundToInt(), (yNorm * canvasHeight).roundToInt()) }
             .transformable(transform)
             .pointerInput(item.id) {
                 detectTapGestures(onLongPress = { onClarifier() }, onPress = {
                     tryAwaitRelease()
-                    onUpdate(item.copy(xNorm = x, yNorm = y, scale = scale, rotationDeg = rotation))
+                    onUpdate(item.copy(xNorm = xNorm, yNorm = yNorm, scale = scale, rotationDeg = rotation))
                 })
             }
             .size(118.dp, 164.dp)
